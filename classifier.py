@@ -4,7 +4,7 @@ We train by building an as small as possible data dictionary which describes all
 
 Convert the module into a class structure later.
 
-[1] Paper
+[1] B. Hu, Y. Chen, and E. Keogh, SIAM 578 (2013)
 """
 
 import numpy as n
