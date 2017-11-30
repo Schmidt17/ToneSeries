@@ -8,6 +8,7 @@ Convert the module into a class structure later.
 """
 
 import numpy as n
+import numpy.ma as ma
 import scipy.linalg as lin
 
 """
@@ -21,12 +22,14 @@ def euclidian_dist_square(a, b): # a, b: either 1D-arrays of same length or one 
 """
 Calculate the distance of two vectors of, in general, different length.
 Returns the lowest Euclidian distance of the test array among all the subsequences of the sample query q
+
+TODO: implement this in Cython. Scales quickly with the difference of query length and test vector lengths.
 """
 def nearest_dist(q, test): # q: Query vector, test: test vector to match
-	bsf_dist = n.inf # best-so-far distance, initialize at infinity
+	# bsf_dist = n.inf # best-so-far distance, initialize at infinity
 	lq = len(q)
 	lt = len(test)
-	dists = n.zeros(abs(lq - lt) + 1)
+	# dists = n.zeros(abs(lq - lt) + 1)
 	# dists = n.zeros(lq + lt - 1)
 	# for i in range(1, lq + lt):
 		# print(len(q[max(0,i-lt):min(i,lq)]), len(test[max(0,lt-i):min(lt,lt-i+lq)]))
@@ -38,12 +41,15 @@ def nearest_dist(q, test): # q: Query vector, test: test vector to match
 			if new_dist < bsf_dist:
 				bsf_dist = new_dist
 	else:
-		for i in range(lq, lt + 1): # if we know that lt >= lq
-			new_dist = n.sqrt(euclidian_dist_square(q, test[lt-i:lt-i+lq])) / lq
-			dists[i-lq] = new_dist
-			if new_dist < bsf_dist:
-				bsf_dist = new_dist
-	return bsf_dist, dists
+		# for i in range(lq, lt + 1): # if we know that lt >= lq
+		# 	new_dist = n.sqrt(euclidian_dist_square(q, test[lt-i:lt-i+lq])) / lq
+		# 	dists[i-lq] = new_dist
+		# 	if new_dist < bsf_dist:
+		# 		bsf_dist = new_dist
+		testsubs = lin.hankel(test[:len(q)], test[len(q)-1:]).T
+		dists = n.sqrt(euclidian_dist_square(q, testsubs))
+		bsf_dist = n.min(dists)
+	return bsf_dist
 
 """
 Classify query q using the data dictionary D.
@@ -54,7 +60,7 @@ def classify(q, D, r):
 	class_prediction = -1 # current best estimate for the class of q, initialize at 'other', labeled by -1
 	for c_ind, cl in enumerate(D): # iterate over classes in D
 		for vec in cl: # iterate over vectors that belong to the current class
-			new_dist, dists = nearest_dist(q, vec)
+			new_dist = nearest_dist(q, vec)
 			if new_dist < bsf_nn_dist:
 				bsf_nn_dist = new_dist
 				class_prediction = c_ind # assign q the class of the (current) nearest neighbor. QUESTION: should it not be the nearest neighbor after summing all distances within each class?
@@ -115,9 +121,14 @@ def train(training_data, x, l, maxqueries):
 	# start with all the training data C as Q. D is empty.
 	C = []
 	doubleC = []
+	Cmask = []
 	for sample_class in training_data:
 		# TODO: add loop over various time series per class
-		C.append(lin.hankel(sample_class[:l], sample_class[l-1:]).T) # create all l-length subsequences of the training data from the current class (assuming one time series per class)
+		doubleC.append(lin.hankel(sample_class[:2*l], sample_class[2*l-1:]).T)  # create all 2*l-length subsequences of the training data from the current class (assuming one time series per class)
+		sample_class = sample_class[l/2:-l/2]  # remove l/2 points at beginning and end of the time series to be able to pad the queries later
+		C.append(lin.hankel(sample_class[:l], sample_class[l-1:]).T) # create all l-length subsequences of the training data (without the first and last l/2 points, assuring that each subsequence in C corresponds to a l/2-padded subsequence in doubleC) from the current class (assuming one time series per class)
+		# Cmask.append(n.ones(len(C[-1]), dtype=bool)) # create a mask for C, so we can turn off sequences at will; initialize with True everywhere
+		assert(len(C[-1]) == len(doubleC[-1]))
 	D = [[] for cl_num in xrange(N_train)] # D will contain actual sequences because we want to pass them to the classifier
 	# Q0 = []
 	# for sample_class in training_data:
@@ -132,19 +143,21 @@ def train(training_data, x, l, maxqueries):
 	Dcount = 0 # initialize counter for length of D
 	while (Dcount < maxDlength) and (len(Q) > 0):
 		# 1: score C by drawing random queries from Q and calculating likely false/true positives.
-		S = [n.zeros(len(cl)) for cl in C] # initialize scores with zeros
+		S = [n.zeros(len(cl)) for k, cl in enumerate(C)] # initialize scores with zeros
 		count = 0 # counter for scoring queries
 		# chosenQs = n.random.choice(Q, maxqueries, replace = False)
 		print("Length of Q: {0}".format(len(Q)))
 		chosenQs = Q[list(n.random.permutation(n.arange(len(Q)))[:maxqueries])]
 		for q in chosenQs:
 			score(q, C, S)
-		# 2: take the subsequence in C with the highest score, place it in D and remove it from C.
+		# 2: take the subsequence in C with the highest score, place its padded version in D and remove it from C. TODO: maybe use masking instead of deleting. The big mask is quite memory-heavy ... Go back to deleting
 		if Dcount == 0: # in first iteration choose best subsequence from each class for placement in D
 			for cl in range(len(C)):
 				max_ind = S[cl].argmax()
-				D[cl].append(C[cl][max_ind])
+				D[cl].append(doubleC[cl][max_ind])
 				C[cl] = n.delete(C[cl], max_ind, 0)
+				doubleC[cl] = n.delete(doubleC[cl], max_ind, 0)
+				# Cmask[cl][max_ind] = False
 			Dcount = N_train
 		else:
 			max_index = [0,0]
@@ -156,9 +169,12 @@ def train(training_data, x, l, maxqueries):
 					max_val = new_val
 					max_index = [i, new_ind]
 			print(max_index)
-			D[max_index[0]].append(C[max_index[0]][max_index[1]]) # add the highest scoring subsequence to the respective class in D and ...
+			D[max_index[0]].append(doubleC[max_index[0]][max_index[1]]) # add the highest scoring subsequence to the respective class in D and ...
 			Dcount += 1
-			C[max_index[0]] = n.delete(C[max_index[0]], max_index[1], 0) # ... remove it from C
+			C[max_index[0]] = n.delete(C[max_index[0]], max_index[1], 0) # ... remove it from C ...
+			doubleC[max_index[0]] = n.delete(doubleC[max_index[0]], max_index[1], 0) # ... and doubleC.
+			# Cmask[max_index[0]][max_index[1]] = False  # ... mask it in C
+		print("Length of current D: {0}".format([len(d) for d in D]))
 		# 3: classify all subsequences in C with the new D. Make Q equal to the set of subsequences that could not be correctly classified.
 		Q = []
 		for class_label, seqs in enumerate(C):
@@ -168,7 +184,6 @@ def train(training_data, x, l, maxqueries):
 				if class_prediction != class_label:
 					Q.append([class_label, k])
 		Q = n.array(Q)
-		print("Length of current D: {0}".format([len(d) for d in D]))
 		# if length of D exceeds x: break, else: goto 1
 	print("Fraction of wrongly classified queries after learning: {0}".format(float(len(Q))/float(N_subseq)))
 	# learn the rejection threshold r, passing a set of valid and a set of invalid queries and D.
@@ -198,7 +213,7 @@ sample_data = [get_sample(tn) for tn in learn_tones]
 for i, s in enumerate(sample_data):
 	sample_data[i] = s[:len(s)//4]
 
-D, r = train(sample_data, 1., 512, 10)
+D, r = train(sample_data, .1, 128, 10)
 
 cl = n.random.randint(len(learn_tones))
 seq_ind = n.random.randint(len(sample_data[cl]) - 130)
